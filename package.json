@@ -1,0 +1,22 @@
+{
+  "name": "mcp-diagnostics-suite",
+  "version": "1.0.2",
+  "description": "Production diagnostics MCP server with multi-transport support",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "postinstall": "node scripts/setup.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  },
+  "bin": {
+    "mcp-diagnostics": "./dist/cli.js"
+  }
+}
