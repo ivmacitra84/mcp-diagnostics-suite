@@ -1,10 +1,10 @@
 {
   "name": "mcp-diagnostics-suite",
-  "version": "1.0.2",
+  "version": "1.0.9",
   "description": "Production diagnostics MCP server with multi-transport support",
   "main": "index.js",
   "scripts": {
-    "build": "node scripts/provenance.js",
+    "build": "node scripts/setup.js",
     "postinstall": "node scripts/setup.js",
     "start": "node index.js"
   },
