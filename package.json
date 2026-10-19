@@ -4,7 +4,7 @@
   "description": "Production diagnostics MCP server with multi-transport support",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/provenance.js",
     "postinstall": "node scripts/setup.js",
     "start": "node dist/index.js"
   },
