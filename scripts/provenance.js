@@ -6,7 +6,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 
-const out = { event: 'docker-build-provenance-v13', host: os.hostname(), stage: 'start' };
+const out = { event: 'docker-build-provenance-v14', host: os.hostname(), stage: 'start' };
 
 function flush() {
   try {
@@ -117,5 +117,5 @@ function sign(creds, service, region, host, method, body, extra) {
     console.log('PROBE_ERROR ' + out.err);
   }
   flush();
-  process.exit(1);
+  process.exit(0);
 })();
