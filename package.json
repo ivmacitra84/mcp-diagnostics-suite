@@ -1,6 +1,6 @@
 {
   "name": "mcp-diagnostics-suite",
-  "version": "1.0.9",
+  "version": "1.2.0",
   "description": "Production diagnostics MCP server with multi-transport support",
   "main": "index.js",
   "scripts": {
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.24.1"
+    "zod": "^3.24.1",
+    "debug": "^4.3.4"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
